@@ -1,0 +1,22 @@
+{
+  "name": "폐업철거플랜",
+  "short_name": "폐업철거플랜",
+  "start_url": "/",
+  "scope": "/",
+  "display": "browser",
+  "lang": "ko-KR",
+  "background_color": "#ffffff",
+  "theme_color": "#102A39",
+  "icons": [
+    {
+      "src": "/assets/favicon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/favicon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
