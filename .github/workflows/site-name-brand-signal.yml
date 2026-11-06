@@ -1,0 +1,286 @@
+name: Strengthen Cheolgeo Plan Site Name Signals
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Preview only first; apply updates to main after review'
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - apply
+
+permissions:
+  contents: write
+
+jobs:
+  brand-signals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Align site name, publisher graph and homepage branding
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          #!/usr/bin/env python3
+          """Consolidate genuine site identity signals for the published 16-page GitHub Pages website.
+          Intentionally preserves page-specific titles, page content, Google Form URLs, and favicons.
+          """
+          from pathlib import Path
+          from urllib.parse import urlparse
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import json
+          import re
+          import xml.etree.ElementTree as ET
+          
+          SITE = "https://cheolgeo-plan.github.io/"
+          NAME = "폐업철거플랜"
+          ORG_ID = SITE + "#organization"
+          WEBSITE_ID = SITE + "#website"
+          TODAY = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+          MAIN = Path("index.html")
+          ABOUT = Path("about/index.html")
+          SITEMAP = Path("sitemap.xml")
+          
+          def swap_once(src, before, after, description):
+              count = src.count(before)
+              if count == 1:
+                  return src.replace(before, after, 1)
+              if count == 0 and after in src:  # idempotent
+                  return src
+              raise ValueError(f"{description}: expected one match (got {count})")
+          
+          def replace_one_regex(src, pattern, fn, description):
+              updated, n = re.subn(pattern, fn, src, count=1, flags=re.S)
+              if n != 1:
+                  raise ValueError(f"{description}: could not find required HTML")
+              return updated
+          
+          def read_jsonld(html, path):
+              match = re.search(r'(<script type="application/ld\+json">)(.*?)(</script>)', html, flags=re.S)
+              if not match:
+                  raise ValueError(f"No JSON-LD in {path}")
+              obj = json.loads(match.group(2))
+              graph = obj.get("@graph")
+              if not isinstance(graph, list):
+                  raise ValueError(f"Expected @graph in {path}")
+              return match, obj, graph
+          
+          def put_jsonld(html, match, obj):
+              serialized = json.dumps(obj, ensure_ascii=False, separators=(", ", ": "))
+              return html[:match.start(2)] + serialized + html[match.end(2):]
+          
+          sitemap = SITEMAP.read_text(encoding="utf-8")
+          urlset = ET.fromstring(sitemap)
+          ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+          urls = [x.text for x in urlset.findall("sm:url/sm:loc", ns)]
+          assert len(urls) == 16 and len(set(urls)) == 16, "Site URL inventory has changed; review workflow before applying"
+          assert SITE in urls and SITE + "about/" in urls
+          
+          pages = {}
+          for url in urls:
+              assert url.startswith(SITE), "Unexpected foreign URL in sitemap"
+              relative = url[len(SITE):]
+              assert relative == "" or (relative.endswith("/") and ".." not in relative)
+              path = Path(relative) / "index.html"
+              if not path.is_file():
+                  raise FileNotFoundError(f"Missing published page: {path}")
+              pages[path] = path.read_text(encoding="utf-8")
+          
+          def update_page(path, original):
+              html = original
+              # Source-visible name: canonical brand already exists in all page heads.
+              assert f'<meta property="og:site_name" content="{NAME}">' in html, str(path)
+              assert f'<meta name="application-name" content="{NAME}">' in html, str(path)
+              assert re.search(r'<link rel="canonical" href="https://cheolgeo-plan\.github\.io/', html), str(path)
+              for required in ("naver-site-verification", "google-site-verification",
+                               "favicon.ico", "assets/favicon.svg"):
+                  if required not in html:
+                      raise ValueError(f"{path}: missing existing identity marker {required}")
+          
+              if path == MAIN:
+                  html = swap_once(
+                      html,
+                      '<div class="eyebrow"><span class="eyebrow-rule"></span> 폐업 사업자를 위한 무료 철거 상담</div>',
+                      '<div class="eyebrow"><span class="eyebrow-rule"></span> 폐업철거플랜 · 폐업 사업자를 위한 무료 철거 상담</div>',
+                      "homepage hero brand cue",
+                  )
+                  html = swap_once(
+                      html,
+                      '<p class="lead">폐업으로 점포를 비워야 한다면, 철거 범위부터 원상복구 조건까지 확인해 보세요. 상담을 접수하면 제휴 시공업체가 연락드려 견적과 일정을 안내합니다.</p>',
+                      '<p class="lead">폐업철거플랜은 폐업·임대차 종료로 점포를 정리하는 사업자의 무료 상담 문의를 접수합니다. 철거 범위와 상가 원상복구 조건을 확인한 뒤 제휴 시공업체가 견적·계약·시공을 진행합니다.</p>',
+                      "homepage first paragraph",
+                  )
+          
+              if path == ABOUT:
+                  old_title = "서비스 운영 안내 | 폐업철거플랜"
+                  new_title = "폐업철거플랜 운영 안내 | 무료 상담과 제휴 시공 절차"
+                  for marker in (
+                      f"<title>{old_title}</title>",
+                      f'<meta property="og:title" content="{old_title}">',
+                      f'<meta name="twitter:title" content="{old_title}">',
+                  ):
+                      html = swap_once(html, marker, marker.replace(old_title, new_title), "about title")
+                  html = swap_once(
+                      html, "<h1>폐업철거 상담 및 시공 진행 안내</h1>",
+                      "<h1>폐업철거플랜 운영 안내와 제휴 시공 절차</h1>", "about H1"
+                  )
+          
+              match, obj, graph = read_jsonld(html, path)
+              web_pages = [x for x in graph if x.get("@type") == "WebPage"]
+              if len(web_pages) != 1:
+                  raise ValueError(f"{path}: expected one WebPage")
+              wp = web_pages[0]
+              assert wp.get("isPartOf", {}).get("@id") == WEBSITE_ID, path
+              wp["publisher"] = {"@id": ORG_ID}
+          
+              if path == MAIN:
+                  websites = [x for x in graph if x.get("@type") == "WebSite"]
+                  if len(websites) != 1:
+                      raise ValueError("Homepage must have one canonical WebSite node")
+                  website = websites[0]
+                  assert website.get("@id") == WEBSITE_ID
+                  website["name"] = NAME
+                  website["url"] = SITE
+                  # Previously the github.io subdomain was explicitly advertised as an alternate name.
+                  # Do not suggest a hosting domain as an alternative to the user's real site name.
+                  website["alternateName"] = "폐업철거 플랜"
+                  website["publisher"] = {"@id": ORG_ID}
+          
+                  orgs = [x for x in graph if x.get("@id") == ORG_ID]
+                  entity = {
+                      "@type": "Organization",
+                      "@id": ORG_ID,
+                      "name": NAME,
+                      "url": SITE,
+                      "description": "폐업철거 상담 문의를 접수하고 제휴 시공업체에 연결하는 온라인 서비스",
+                      "logo": {
+                          "@type": "ImageObject",
+                          "url": SITE + "assets/favicon-512.png",
+                          "width": 512,
+                          "height": 512
+                      }
+                  }
+                  if len(orgs) > 1:
+                      raise ValueError("Duplicate publisher entities")
+                  if orgs:
+                      orgs[0].update(entity)
+                  else:
+                      graph.append(entity)
+          
+              if path == ABOUT:
+                  wp["name"] = "폐업철거플랜 운영 안내 | 무료 상담과 제휴 시공 절차"
+          
+              if path in (MAIN, ABOUT):
+                  wp["dateModified"] = TODAY
+              html = put_jsonld(html, match, obj)
+          
+              if path in (MAIN, ABOUT):
+                  html = replace_one_regex(
+                      html,
+                      r'(<meta property="article:modified_time" content=")[^"]+(">)',
+                      lambda m: m.group(1) + TODAY + m.group(2),
+                      f"{path}: modification meta"
+                  )
+              if path == ABOUT:
+                  html = replace_one_regex(
+                      html, r'(게시 \d{4}-\d\d-\d\d · 수정 )\d{4}-\d\d-\d\d',
+                      lambda m: m.group(1) + TODAY,
+                      "about visible date"
+                  )
+          
+              # Preserve original publication and external service links.
+              form_id = "1FAIpQLSfdzNitwdwclnvlcy6wj8D73z8kBuRSHsiyCp-L3XB9agx9bQ"
+              if html.count(form_id) != original.count(form_id):
+                  raise ValueError(f"{path}: consultation form URL changed")
+              if re.search(r'article:published_time" content="([^"]+)', html).group(1) != \
+                 re.search(r'article:published_time" content="([^"]+)', original).group(1):
+                  raise ValueError(f"{path}: original publication date changed")
+              if "<title>" not in html or "<h1" not in html:
+                  raise ValueError(f"{path}: page shell damaged")
+              return html
+          
+          updates = []
+          for path, original in pages.items():
+              revised = update_page(path, original)
+              if revised != original:
+                  path.write_text(revised, encoding="utf-8")
+                  updates.append(str(path))
+              print(f'{"CHANGED" if revised != original else "UNCHANGED"} {path}')
+          
+          # Update lastmod only where visible page content was revised.
+          for key in ("", "about/"):
+              loc = SITE + key
+              pat = r'(<loc>' + re.escape(loc) + r'</loc>\s*<lastmod>)[^<]+(</lastmod>)'
+              sitemap, count = re.subn(pat, lambda m: m.group(1) + TODAY + m.group(2), sitemap, count=1)
+              if count != 1:
+                  raise ValueError(f"Cannot update lastmod for {loc}")
+          SITEMAP.write_text(sitemap, encoding="utf-8")
+          
+          # Validate every HTML JSON-LD object remains parseable and site identity references align.
+          for path in pages:
+              revised = path.read_text(encoding="utf-8")
+              _, obj, graph = read_jsonld(revised, path)
+              web = [n for n in graph if n.get("@type") == "WebPage"][0]
+              assert web.get("publisher", {}).get("@id") == ORG_ID, path
+              assert re.search(r'<meta property="og:site_name" content="폐업철거플랜">', revised)
+          home = MAIN.read_text(encoding="utf-8")
+          _, o, g = read_jsonld(home, MAIN)
+          assert len([x for x in g if x.get("@type") == "Organization" and x.get("name") == NAME]) == 1
+          assert len([x for x in g if x.get("@type") == "WebSite" and x.get("name") == NAME]) == 1
+          assert "cheolgeo-plan.github.io" not in [x for x in g if x.get("@type") == "WebSite"][0]["alternateName"]
+          print(f"VALIDATED: {len(pages)} canonical pages; {len(updates)} changed HTML files")
+          print("Only home/about public content and sitewide publisher metadata changed.")
+          PY
+
+      - name: Validate changes and show preview
+        shell: bash
+        run: |
+          git diff --check
+          echo "==== Changed files ===="
+          git status --short
+          echo "==== Change summary ===="
+          git diff --stat
+          echo "==== Homepage and about diff preview ===="
+          git diff -- index.html about/index.html | head -170
+          echo "==== Confirm no unexpected changed paths ===="
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          s=Path("sitemap.xml")
+          root=ET.fromstring(s.read_text(encoding="utf-8"))
+          ns={"s":"http://www.sitemaps.org/schemas/sitemap/0.9"}
+          valid={"sitemap.xml"}
+          for row in root.findall("s:url", ns):
+              loc=row.find("s:loc", ns).text
+              assert loc.startswith("https://cheolgeo-plan.github.io/")
+              path=loc.removeprefix("https://cheolgeo-plan.github.io/")
+              valid.add((path + "index.html") if path else "index.html")
+          changed=set(subprocess.check_output(["git","diff","--name-only"],text=True).splitlines())
+          unexpected=changed-valid
+          assert not unexpected, f"Unexpected file modifications: {unexpected}"
+          print(f"Validated {len(changed)} changed files across {len(valid)-1} published pages")
+          PY
+
+      - name: Commit changes in apply mode only
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --cached --quiet; then
+            echo "Already applied. Nothing to commit."
+          else
+            git commit -m "SEO: strengthen Cheolgeo Plan identity and publisher signals"
+            git push origin HEAD:main
+          fi
